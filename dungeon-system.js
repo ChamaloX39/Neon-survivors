@@ -59,34 +59,57 @@ export function createDungeonSystem({THREE,world,hero,makeEnemy,getEnemies,onRoo
   return r&&Math.abs(x-r.cx)<=S/2+.01&&Math.abs(z-r.cz)<=S/2+.01?r:null;
  }
  function constrainMovement(fromX,fromZ,toX,toZ){
-  const current=roomAt(fromX,fromZ);if(!current)return{x:fromX,z:fromZ};
-  const dx=toX-current.cx,dz=toZ-current.cz,half=S/2-.05;
+  const current=roomAt(fromX,fromZ);
+  if(!current)return{x:fromX,z:fromZ};
   let x=toX,z=toZ;
-  if(Math.abs(dx)>half){
-   const dir=dx>0?"east":"west",edge=current.connections.some(e=>e.dir===dir);
-   if(!edge||Math.abs(dz)>DOOR/2-MARGIN)x=current.cx+Math.sign(dx)*half;
+  const half=S/2-.42, doorHalf=DOOR/2-.42;
+  // Resolve X and Z independently so diagonal movement does not lose speed.
+  const dx=toX-current.cx, dz=toZ-current.cz;
+  if(dx>half){
+   const open=current.connections.some(e=>e.dir==="east");
+   if(!open||Math.abs(dz)>doorHalf)x=current.cx+half;
+  }else if(dx< -half){
+   const open=current.connections.some(e=>e.dir==="west");
+   if(!open||Math.abs(dz)>doorHalf)x=current.cx-half;
   }
-  if(Math.abs(dz)>half){
-   const dir=dz>0?"south":"north",edge=current.connections.some(e=>e.dir===dir);
-   if(!edge||Math.abs(dx)>DOOR/2-MARGIN)z=current.cz+Math.sign(dz)*half;
+  if(dz>half){
+   const open=current.connections.some(e=>e.dir==="south");
+   if(!open||Math.abs(dx)>doorHalf)z=current.cz+half;
+  }else if(dz< -half){
+   const open=current.connections.some(e=>e.dir==="north");
+   if(!open||Math.abs(dx)>doorHalf)z=current.cz-half;
   }
   return{x,z};
  }
  function enemiesInRoom(r){return getEnemies().filter(e=>e.roomId===r.id)}
+ function populateRoom(r){
+  if(r.populated)return;
+  r.populated=true;
+  if(["start","rest","treasure","event"].includes(r.type))return;
+  const p=r.depth/Math.max(1,last.depth),boss=r.type==="boss"||r.type==="final-boss";
+  const count=boss?1:r.type==="elite"?7:4+Math.floor(p*5);
+  for(let i=0;i<count;i++){
+   const angle=rand()*Math.PI*2,rad=2.4+rand()*3.7;
+   const e=makeEnemy(r.cx+Math.cos(angle)*rad,r.cz+Math.sin(angle)*rad,boss);
+   if(e){
+    e.roomId=r.id;e.awake=false;
+    const mult=1+p*(boss?0:2.15)*(r.type==="elite"?1.25:1);
+    e.max=Math.round(e.max*mult*(r.type==="final-boss"?4.5:r.type==="boss"?2.6:1));
+    e.hp=e.max;e.damage=Math.round(e.damage*(1+p*1.25)*(boss?1.2:1));e.speed*=1+p*.22;
+    r.enemyIds.add(e);
+   }
+  }
+ }
  function spawnRoom(r){
-  if(r.spawned||r.cleared)return;
+  if(r.visited)return;
   r.spawned=true;r.visited=true;
   if(r.type==="start"){r.cleared=true;onRoomChanged(r,"ENTRÉE DU DONJON · EXPLOREZ LES SALLES");return}
   if(r.type==="rest"){onRoomChanged(r,"SALLE DE REPOS · INTÉGRITÉ RESTAURÉE");return}
   if(r.type==="treasure"){onRoomChanged(r,"SALLE AU TRÉSOR · RÉCOMPENSE À RÉCUPÉRER");return}
   if(r.type==="event"){onRoomChanged(r,"ÉVÉNEMENT DÉCOUVERT");return}
-  const p=r.depth/Math.max(1,last.depth),boss=r.type==="boss"||r.type==="final-boss";
-  const count=boss?1:r.type==="elite"?7:4+Math.floor(p*5);
-  for(let i=0;i<count;i++){
-   const a=rand()*Math.PI*2,rad=2.4+rand()*3.7;
-   const e=makeEnemy(r.cx+Math.cos(a)*rad,r.cz+Math.sin(a)*rad,boss);
-   if(e){e.roomId=r.id;const mult=1+p*(boss?0:2.15)*(r.type==="elite"?1.25:1);e.max=Math.round(e.max*mult*(r.type==="final-boss"?4.5:r.type==="boss"?2.6:1));e.hp=e.max;e.damage=Math.round(e.damage*(1+p*1.25)*(boss?1.2:1));e.speed*=1+p*.22;r.enemyIds.add(e)}
-  }
+  for(const e of enemiesInRoom(r))e.awake=true;
+  const boss=r.type==="boss"||r.type==="final-boss";
+  const count=enemiesInRoom(r).length;
   onRoomChanged(r,boss?(r.type==="final-boss"?"BOSS FINAL · LE SURVEILLANT":"BOSS GARDIEN"):`${r.type.toUpperCase()} · ${count} ENNEMIS`);
  }
  function claimSpecial(r,state){
@@ -98,6 +121,7 @@ export function createDungeonSystem({THREE,world,hero,makeEnemy,getEnemies,onRoo
   return null;
  }
  let active=null;
+ for(const r of rooms)populateRoom(r); // All room enemies physically exist before the player enters.
  hero.position.set(0,0,0);
  spawnRoom(rooms[0]);
  return {
@@ -115,8 +139,8 @@ export function createDungeonSystem({THREE,world,hero,makeEnemy,getEnemies,onRoo
    }
   },
   reset(state){
-   for(const e of [...getEnemies()]){if(e.roomId!==undefined){world.remove(e.g);getEnemies().splice(getEnemies().indexOf(e),1)}}
-   rooms.forEach(r=>{r.cleared=false;r.visited=false;r.spawned=false;r.rewardClaimed=false;r.enemyIds.clear()});
+   for(const e of getEnemies())if(e.roomId!==undefined){e.awake=false;e.hp=e.max;e.attack=0}
+   rooms.forEach(r=>{r.cleared=false;r.visited=false;r.spawned=false;r.rewardClaimed=false});
    active=null;hero.position.set(0,0,0);spawnRoom(rooms[0]);
   },
   getSummary(){return{seed,rooms:rooms.length,cleared:rooms.filter(r=>r.cleared).length,finalRoomId:last.id}}
